@@ -1,70 +1,115 @@
+import pandas as pd
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+from airflow.sensors.external_task import ExternalTaskSensor
 from datetime import datetime
-import pandas as pd
 
-# Carga del CSV
-def read_csv():
+
+def extract():
+    
+    """Extracción
+    Esta función tiene como objetivo extraer los datos de la automatización que se encuentran en GitHub
+    
     """
-    Esta función leera el archivo csv que tenemos en la carpeta "Entrada"
-    """
-    csv_reader = pd.read_csv(r'C:\Users\DIEZ\Desktop\Challenge Airflow\Entrada\Traffic_Flow_Map_Volumes.csv')
-    print('**************Dataset cargado**************')
-    return csv_reader
-
-
-# Transformación de Datos:
-# a. Crear una tarea PythonOperator de Airflow para limpiar y transformar los datos
-# eliminando cualquier fila con valores faltantes.
-
-def clean_data():
-    df = pd.read_csv(r'C:\Users\DIEZ\Desktop\Challenge Airflow\Entrada\Traffic_Flow_Map_Volumes.csv')
+    path='https://raw.githubusercontent.com/Luismadrid77/Challenge_Airflow/main/Challenge%20Airflow/Entrada/Traffic_Flow_Map_Volumes.csv'
+    trafic = pd.read_csv(path)
+    json_data = trafic.to_json()
     
-    # Eliminar los null de las filas
-    print('*********\n Eliminando valores faltantes... \n*********')
-    df.dropna(inplace = True)
-    print('*********\n Valores eliminados \n*********')
+    print('\n***********Dataset cargado \n***********')
     
-    #Cambiamos el tipo de dato de la columna YEARS y lo cambiamos a formato Datetime
-    pd.to_datetime(df['YEAR'])
+    return json_data
+
+with DAG (dag_id='Extract', schedule_interval='@once', description= 'Data extraction', start_date=datetime(2023,11,19)) as extraction_dag:
+    extract_task= PythonOperator(
+        task_id='extract_data',
+        python_callable=extract,
+        dag = extraction_dag
+    )
+
+
+def transfomr():
+    data = extract()
+    data = pd.read_json(data)
+    data.drop_duplicates(inplace=True)
+# Eliminar valores null
+    print('\n***********Eliminando valores faltantes***********\n')
+    data.dropna(inplace=True)
+    print('\n***********Valores faltantes eliminados***********\n')
+
+    pd.to_datetime(data.YEAR)
+    json_data = data.to_json()
+    return json_data
+
+with DAG(dag_id = 'Data_transform', schedule = '@once', description = 'Transformación de los datos',start_date=datetime(2023,11,19)) as data_transform:
     
-    # Exportamos el CSV transformado
-    df.to_csv(r'C:\Users\DIEZ\Desktop\Challenge Airflow\Salida\Clean_data.csv', index = False, encoding='utf-8')
-    return df
-
-# Tarea de Airflow para limpieza de datos
-clean_task = PythonOperator(
-    task_id='clean_data',
-    python_callable=clean_data)
-
-# Calcular el número total de accidentes por tipo de clima.
-def accidentes_clima():
-    df = pd.read_csv(r'C:\Users\DIEZ\Desktop\Challenge Airflow\Entrada\Traffic_Flow_Map_Volumes.csv')
-    accidentes_por_clima = df.groupby('STNAME')['COUNT_LOCATION'].count()
-    # Lo convertimos en un CSV
-    accidentes_por_clima.to_csv(r'C:\Users\DIEZ\Desktop\Challenge Airflow\Salida\accidentes_clima.csv', index = False, encoding='utf-8')
+    external_sensor = ExternalTaskSensor(
+        task_id='external_sensor',
+        external_task_id='extract_data',
+        external_dag_id='Extract',
+        dag = data_transform
+    )
+    
+    transform_task= PythonOperator(
+        task_id= 'transform_data',
+        python_callable= transfomr,
+        dag = data_transform,
+        trigger_rule = 'all_done'
+    )
+    
+    external_sensor >> transform_task
+    
+    
+def accidentes_clima(): 
+    
+    data = extract()
+    data = pd.read_json(data)
+    data.drop_duplicates(inplace=True)
+    
+    accidentes_por_clima = data.groupby('STNAME')['COUNT_LOCATION'].count()
+    # Lo convertimos en un JSON
+    accidentes_por_clima.to_csv('Accidentes_clima.csv')
+    accidentes_por_clima.to_json()
+    
     return accidentes_por_clima
 
-
-
-
-
-with DAG(dag_id = 'ETL', schedule = '@daily', description= 'Extracción_Transformación_Carga',start_date=datetime(2023,4,30)) as dag:
-    # Tarea PythonOperator de Airflow para leer el archivo CSV.
-    read_csv_task = PythonOperator(
-    task_id='read_csv',
-    python_callable=read_csv)
+with DAG(dag_id='accidentes_clima' , schedule='@once', start_date=datetime(2023,11,19))as dag_accidentes:
+    clima_sensor = ExternalTaskSensor(
+        task_id='censor_clima',
+        external_dag_id='Data_transform',
+        external_task_id ='transform_data',
+        dag = dag_accidentes        
+    )
     
-    # Tarea de Airflow para limpieza de datos
-    clean_task = PythonOperator(
-    task_id='clean_data',
-    python_callable=clean_data)
-      
-    # Tarea para calculas los accidentes por clima
-    calculate_task = PythonOperator(
-    task_id='calculate_accidents',
-    python_callable=accidentes_clima)
+    transform_data_task = PythonOperator(
+        task_id = 'clean_data',
+        python_callable= accidentes_clima,
+        dag = dag_accidentes,
+        trigger_rule = 'all_done'
+    )
     
-    read_csv_task >> clean_task >> calculate_task
+    clima_sensor >> transform_data_task
     
+    
+def loadData():
+    
+    data = transfomr()
+    data = pd.read_json(data)
+    path = 'Transform_traffic_flow_map_volumes.csv'
+    data.to_csv(path, index = False, encoding = 'utf-8')
+    return data.to_json()
 
+with DAG('Export', schedule = '@once', start_date=datetime(2023,11,19)) as dag_load:
+    wait_for_transformation = ExternalTaskSensor(
+        task_id='wait_for_transformation',
+        external_dag_id='Data_transform',
+        external_task_id='transform_data',
+        dag=dag_load
+    )
+    
+    export_data = PythonOperator(
+        task_id ='export_data',
+        python_callable= loadData,
+        dag= dag_load,
+        trigger_rule = 'all_done'
+    )
+    wait_for_transformation >> export_data
